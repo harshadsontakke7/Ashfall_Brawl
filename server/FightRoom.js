@@ -1,5 +1,5 @@
 const { Room } = require('@colyseus/core');
-const { HOST_ONLY, sanitizeLobby, sanitizeInput, Bucket } = require('./protocol');
+const { HOST_ONLY, sanitizeLobby, sanitizeInput, sanitizeSig, Bucket } = require('./protocol');
 
 const CODE_RE = /^[A-Z]{6}$/;
 const RECONNECT_SECONDS = 20;
@@ -24,6 +24,7 @@ class FightRoom extends Room {
 
     this.onMessage('lob', (c, raw) => this.relay(c, 'lob', sanitizeLobby(raw), 'lob'));
     this.onMessage('inp', (c, raw) => this.relay(c, 'inp', sanitizeInput(raw), 'inp'));
+    this.onMessage('sig', (c, raw) => this.relay(c, 'sig', sanitizeSig(raw), 'sig'));   // WebRTC handshake
     this.onMessage('*', () => {});
 
     // reap rooms nobody is using (abandoned lobby or frozen match)
@@ -58,7 +59,7 @@ class FightRoom extends Room {
     if (!consented) {
       try { await this.allowReconnection(client, RECONNECT_SECONDS); return; } catch (_) { /* timed out */ }
     }
-    this.buckets.delete(client.sessionId + 'lob'); this.buckets.delete(client.sessionId + 'inp');
+    this.buckets.delete(client.sessionId + 'lob'); this.buckets.delete(client.sessionId + 'inp'); this.buckets.delete(client.sessionId + 'sig');
     this.drops.delete(client.sessionId);
     this.broadcast('peerleft', { peer: client.sessionId });
   }

@@ -28,6 +28,15 @@ function sanitizeInput(m) {
   return o;
 }
 
+// WebRTC signalling (offer/answer/ICE) - relayed between the two peers, never interpreted by the server.
+const SIG_KINDS = new Set(['hi','offer','answer','ice']);
+function sanitizeSig(m) {
+  if (!m || typeof m !== 'object' || !SIG_KINDS.has(m.k)) return null;
+  const o = { k: m.k };
+  if (m.s !== undefined) { if (typeof m.s !== 'string' || m.s.length > 3000) return null; o.s = m.s; }
+  return o;
+}
+
 // Simple token bucket: rate tokens/sec, up to burst.
 class Bucket {
   constructor(rate, burst) { this.rate = rate; this.burst = burst; this.tokens = burst; this.t = Date.now(); }
@@ -40,4 +49,4 @@ class Bucket {
   }
 }
 
-module.exports = { HOST_ONLY, sanitizeLobby, sanitizeInput, Bucket };
+module.exports = { HOST_ONLY, sanitizeLobby, sanitizeInput, sanitizeSig, Bucket };
