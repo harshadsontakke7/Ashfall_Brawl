@@ -2,7 +2,10 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#070509">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Ashfall Brawl — C++ WebAssembly Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -426,6 +429,15 @@ kbd{
   .pad button.on{opacity:1}
   .dpad,.face{pointer-events:none}
 }
+
+/* LANDSCAPE ENFORCEMENT (phones/tablets): block portrait while a match is running */
+html,body{overscroll-behavior:none}
+#rotateOverlay{display:none;position:fixed;inset:0;z-index:100000;background:#070509;color:#f4f2f6;flex-direction:column;align-items:center;justify-content:center;gap:16px;text-align:center;padding:24px;font:700 20px 'Rajdhani','Segoe UI',sans-serif;letter-spacing:.04em}
+#rotateOverlay .ro-icon{font-size:60px;line-height:1;display:inline-block;animation:roTurn 2.2s ease-in-out infinite}
+#rotateOverlay button{font:800 16px 'Rajdhani','Segoe UI',sans-serif;letter-spacing:.08em;color:#fff;background:#ff3b19;border:0;border-radius:4px;padding:12px 22px;min-height:44px}
+@keyframes roTurn{0%,25%{transform:rotate(0)}65%,100%{transform:rotate(-90deg)}}
+@media (pointer:coarse) and (orientation:portrait) and (max-width:600px){#rotateOverlay{display:flex}}
+@media (pointer:coarse) and (orientation:portrait) and (max-width:600px){body{overflow:hidden}}
 
 /* DEV PANEL */
 #devPanel{
@@ -2414,6 +2426,7 @@ kbd{
   </div>
 </div>
 <script src="config.js"></script>
+<div id="rotateOverlay" role="alert"><div class="ro-icon">&#128241;</div><div>Rotate your phone sideways to play</div><button type="button" id="roGo">GO FULLSCREEN</button></div>
 <script src="https://cdn.jsdelivr.net/npm/colyseus.js@0.16/dist/colyseus.js"></script>
 <script>
 
@@ -7381,6 +7394,29 @@ document.getElementById('fsBtn').addEventListener('click',async e=>{
   try{if(screen.orientation&&screen.orientation.lock)await screen.orientation.lock('landscape');}catch(_){}
 });
 
+/* ---- Landscape helper: fullscreen + orientation lock (Android Chrome); overlay covers iOS ---- */
+const COARSE=matchMedia('(pointer:coarse)').matches;
+let fsUserExit=false;
+async function goLandscape(){
+  if(!COARSE||fsUserExit)return;
+  try{if(!document.fullscreenElement&&document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen({navigationUI:'hide'});}catch(_){}
+  try{if(screen.orientation&&screen.orientation.lock)await screen.orientation.lock('landscape');}catch(_){}
+}
+let fsTried=false;
+document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&fsTried)fsUserExit=true;});
+document.addEventListener('pointerup',e=>{
+  if(COARSE&&!fsTried){fsTried=true;goLandscape();return;}
+  const b=e.target&&e.target.closest&&e.target.closest('button');
+  if(b&&/start|ready|fight|play|create|join|quick|match/i.test((b.id||'')+' '+(b.textContent||'')))goLandscape();
+},true);
+document.getElementById('roGo').addEventListener('click',()=>{fsUserExit=false;goLandscape();});
+setInterval(()=>{
+  const playing=(G.state==='intro'||G.state==='fight'||G.state==='ko');
+  document.body.classList.toggle('playing',playing);
+  // offline: pause automatically while the phone is held upright
+  if(playing&&COARSE&&!NET.active&&!G.paused&&matchMedia('(orientation:portrait)').matches&&typeof togglePause==='function')togglePause();
+},250);
+
 let DELAY=4;
 NET.rtt=[];
 NET.rttSamples=[];
@@ -7738,6 +7774,8 @@ function updateOnlineUI(){
 /* Multiplayer transport: Colyseus room on the Render server. Same interface the game already used:
    join(roomName,host) -> {on(event,fn), onPeers(fn), emit(event,data), leave()} */
 const GAME_SERVER_URL=String(window.GAME_SERVER_URL||'');
+// Wake a sleeping free-tier server as soon as the page loads, so Create/Join is instant later.
+if(GAME_SERVER_URL){try{fetch(GAME_SERVER_URL.replace(/^ws/,'http')+'/health',{mode:'no-cors',cache:'no-store'}).catch(()=>{});}catch(_){}}
 function createColyseusRoomApi(){
   if(!GAME_SERVER_URL||!window.Colyseus||typeof window.Colyseus.Client!=='function')return null;
   const client=new window.Colyseus.Client(GAME_SERVER_URL);
@@ -7747,14 +7785,98 @@ function createColyseusRoomApi(){
     let room=null,destroyed=false,connecting=false,retryTimer=0,fails=0;
     const listeners=new Map(),peerListeners=new Set();
     const fire=(ev,payload)=>{const b=listeners.get(ev);if(b)for(const fn of b)fn(payload);};
+
+    /* ---- WebRTC P2P: inputs and ping/pong go straight peer-to-peer; the Colyseus relay is the fallback ---- */
+    const ICE_SERVERS=(Array.isArray(window.ICE_SERVERS)&&window.ICE_SERVERS.length)?window.ICE_SERVERS:[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun.cloudflare.com:3478']}];
+    const rtc={pc:null,dc:null,open:false,failed:false,peerId:null,lastRx:0,relayN:0,hiTimer:0,connTimer:0,watch:0,q:Promise.resolve()};
+    const setP2P=v=>{try{NET.p2p=v;}catch(_){}};
+    const sigSend=(k,str)=>{if(!room)return;try{room.send('sig',str===undefined?{k}:{k,s:str});}catch(_){}};
+    function rtcClose(resetFailed){
+      clearInterval(rtc.hiTimer);rtc.hiTimer=0;clearTimeout(rtc.connTimer);clearInterval(rtc.watch);rtc.watch=0;
+      const dc=rtc.dc,pc=rtc.pc;rtc.dc=null;rtc.pc=null;rtc.open=false;rtc.peerId=null;rtc.q=Promise.resolve();setP2P(false);
+      if(dc){dc.onopen=dc.onclose=dc.onmessage=null;try{dc.close();}catch(_){}}
+      if(pc){pc.onicecandidate=pc.onconnectionstatechange=pc.ondatachannel=null;try{pc.close();}catch(_){}}
+      if(resetFailed)rtc.failed=false;
+    }
+    function rtcFail(why){console.warn('[net] P2P unavailable, using relay:',why||'');rtcClose(false);rtc.failed=true;}
+    function cleanInp(m){
+      const I=Number.isInteger;
+      if(!m||typeof m!=='object'||!I(m.mid)||!I(m.a)||m.a<0||!I(m.k)||!Array.isArray(m.d)||m.d.length>32)return null;
+      if(m.seq!==undefined&&!I(m.seq))return null;
+      for(const v of m.d)if(!I(v)||v<0||v>4095)return null;
+      const o={mid:m.mid,seq:m.seq,a:m.a,d:m.d,k:m.k};
+      if(m.c!==undefined){if(!Array.isArray(m.c)||m.c.length!==2||!I(m.c[0])||!I(m.c[1]))return null;o.c=m.c;}
+      return o;
+    }
+    function rtcAttach(dc){
+      rtc.dc=dc;
+      dc.onopen=()=>{
+        rtc.open=true;rtc.lastRx=performance.now();clearInterval(rtc.hiTimer);rtc.hiTimer=0;clearTimeout(rtc.connTimer);
+        try{NET.rttSamples=[];}catch(_){}
+        setP2P(true);console.log('[net] WebRTC P2P connected');
+        rtc.watch=setInterval(()=>{   // P2P silently died while a match runs -> fall back to the relay
+          let active=false;try{active=!!NET.active;}catch(_){}
+          if(active&&performance.now()-rtc.lastRx>2500)rtcFail('no packets for 2.5s');
+        },500);
+      };
+      dc.onclose=()=>{if(rtc.open)rtcFail('channel closed');};
+      dc.onmessage=ev=>{
+        if(typeof ev.data!=='string'||ev.data.length>2048)return;
+        rtc.lastRx=performance.now();
+        let m;try{m=JSON.parse(ev.data);}catch(_){return;}
+        if(!m||typeof m!=='object'||!rtc.peerId)return;
+        if(m.e==='inp'){const d=cleanInp(m.d);if(d)fire('inp',{peer:rtc.peerId,data:d});}
+        else if(m.e==='lob'&&m.d&&(m.d.t==='ping'||m.d.t==='pong')&&typeof m.d.ts==='number'&&isFinite(m.d.ts))fire('lob',{peer:rtc.peerId,data:{t:m.d.t,ts:m.d.ts}});
+      };
+    }
+    function rtcNewPc(peer){
+      rtcClose(false);rtc.peerId=peer;
+      const pc=new RTCPeerConnection({iceServers:ICE_SERVERS});
+      rtc.pc=pc;
+      pc.onicecandidate=e=>{if(e.candidate)sigSend('ice',JSON.stringify(e.candidate));};
+      pc.onconnectionstatechange=()=>{if(pc.connectionState==='failed'&&rtc.pc===pc)rtcFail('ICE failed');};
+      pc.ondatachannel=e=>rtcAttach(e.channel);
+      rtc.connTimer=setTimeout(()=>{if(!rtc.open)rtcFail('timeout');},15000);
+      return pc;
+    }
+    async function rtcHandle(peer,m){
+      if(rtc.failed||!window.RTCPeerConnection)return;
+      if(m.k==='hi'&&host){
+        if(rtc.pc&&rtc.peerId===peer)return;
+        const pc=rtcNewPc(peer);
+        rtcAttach(pc.createDataChannel('g',{ordered:false,maxRetransmits:0}));
+        await pc.setLocalDescription(await pc.createOffer());
+        sigSend('offer',JSON.stringify(pc.localDescription));
+      }else if(m.k==='offer'&&!host&&typeof m.s==='string'){
+        const pc=rtcNewPc(peer);
+        await pc.setRemoteDescription(JSON.parse(m.s));
+        await pc.setLocalDescription(await pc.createAnswer());
+        sigSend('answer',JSON.stringify(pc.localDescription));
+      }else if(m.k==='answer'&&host&&rtc.pc&&rtc.peerId===peer&&typeof m.s==='string'){
+        await rtc.pc.setRemoteDescription(JSON.parse(m.s));
+      }else if(m.k==='ice'&&rtc.pc&&rtc.peerId===peer&&typeof m.s==='string'&&rtc.pc.remoteDescription){
+        await rtc.pc.addIceCandidate(JSON.parse(m.s));
+      }
+    }
+    function rtcSignal(peer,m){   // handled strictly in order
+      rtc.q=rtc.q.then(()=>rtcHandle(peer,m)).catch(e=>{if(String(e&&e.message||e).indexOf('ICE')<0)rtcFail(e&&e.message);});
+    }
+    function startHi(){   // the guest knocks; the host answers with an offer
+      if(host||rtc.failed||rtc.open||rtc.hiTimer||!window.RTCPeerConnection)return;
+      let n=0;
+      const go=()=>{if(rtc.open||rtc.failed||!room||++n>8){clearInterval(rtc.hiTimer);rtc.hiTimer=0;return;}sigSend('hi');};
+      go();rtc.hiTimer=setInterval(go,1500);
+    }
     const bind=r=>{
       room=r;fails=0;connecting=false;
       console.log('[net] connected to room',r.roomId,'as',host?'host':'guest');
       for(const ev of['lob','inp'])r.onMessage(ev,m=>{if(ev==='lob'&&m&&m.data&&m.data.t!=='ping'&&m.data.t!=='pong')console.log('[net] got',m.data.t);if(m&&m.peer)fire(ev,{peer:m.peer,data:m.data});});
       if(opts.onRole&&!bind.done){bind.done=true;opts.onRole(host,code);}
       r.onMessage('peerjoin',()=>{setOnMsg('Friend connected. Opening the character lobby...');});
-      r.onMessage('peerleft',m=>{for(const fn of peerListeners)fn({left:[{peer:m&&m.peer}]});});
+      r.onMessage('peerleft',m=>{rtcClose(true);for(const fn of peerListeners)fn({left:[{peer:m&&m.peer}]});});
       r.onMessage('seat',()=>{});
+      r.onMessage('sig',m=>{if(m&&m.peer&&m.data&&typeof m.data==='object')rtcSignal(m.peer,m.data);});
+      startHi();
       r.onLeave(codeNum=>{
         if(room===r)room=null;
         if(destroyed||codeNum===1000)return;
@@ -7789,7 +7911,7 @@ function createColyseusRoomApi(){
         const msg=String(err&&err.message||err||'');console.warn('[net] connect failed:',msg,'code=',code,'host=',host);
         if(!opts.quick&&!host&&/not found|no rooms|invalid|locked|full/i.test(msg)){setOnMsg(/full|locked/i.test(msg)?'That room is already full.':'Room '+code+' was not found (or is full). Check the code and try again.');return;}
         if(host&&/already|exists|taken/i.test(msg)){setOnMsg('That room code is taken. Press Create Room again.');return;}
-        if(++fails<6){setOnMsg('Waking up the game server... (try '+fails+')');retryTimer=setTimeout(connect,2000);}
+        if(++fails<15){setOnMsg('Waking up the game server... (try '+fails+')');retryTimer=setTimeout(connect,3000);}
         else setOnMsg('Could not reach the game server. Check your connection and try again.');
       });
     };
@@ -7797,8 +7919,17 @@ function createColyseusRoomApi(){
     return{
       on(event,fn){let b=listeners.get(event);if(!b){b=new Set();listeners.set(event,b);}b.add(fn);return()=>b.delete(fn);},
       onPeers(fn){peerListeners.add(fn);return()=>peerListeners.delete(fn);},
-      emit(event,data){if(!room)return Promise.reject(new Error('Not connected'));try{room.send(event,data);return Promise.resolve();}catch(e){return Promise.reject(e);}},
-      leave(){destroyed=true;clearTimeout(retryTimer);const r=room;room=null;if(r){try{r.leave(true);}catch(_){}}}
+      emit(event,data){
+        if(!room)return Promise.reject(new Error('Not connected'));
+        try{
+          if(rtc.open&&rtc.dc&&rtc.dc.readyState==='open'){
+            if(event==='inp'){rtc.dc.send(JSON.stringify({e:'inp',d:data}));if(++rtc.relayN%6!==0)return Promise.resolve();}   // every 6th input also goes via the relay as a safety net
+            else if(event==='lob'&&data&&(data.t==='ping'||data.t==='pong')){rtc.dc.send(JSON.stringify({e:'lob',d:data}));return Promise.resolve();}
+          }
+          room.send(event,data);return Promise.resolve();
+        }catch(e){return Promise.reject(e);}
+      },
+      leave(){destroyed=true;clearTimeout(retryTimer);rtcClose(false);const r=room;room=null;if(r){try{r.leave(true);}catch(_){}}}
     };
   }};
 }
@@ -7822,7 +7953,7 @@ setInterval(()=>{
   const b=$('netBar');
   if(!NET.active){return;}
   const rttStr = NET.rtt ? (NET.rtt + 'ms (±' + (NET.jitter||0) + 'ms)') : 'measuring...';
-  let t = 'Online · Room ' + NET.code + ' · ' + (NET.me==='p1'?'P1':'P2') + ' · Delay: ' + Math.round(DELAY*16.67) + 'ms (' + DELAY + 'f) · Ping: ' + rttStr;
+  let t = 'Online · Room ' + NET.code + ' · ' + (NET.me==='p1'?'P1':'P2') + ' · Delay: ' + Math.round(DELAY*16.67) + 'ms (' + DELAY + 'f) · Ping: ' + rttStr + (NET.p2p?' · P2P':' · Relay');
   if(NET.predictedFrames > 0) t += ' · [Predicting: ' + NET.predictedFrames + 'f]';
   if(NET.stall > 10) t = 'Waiting for remote input... (' + NET.stall + '/' + NET.stallTimeout + ')';
   if(NET.desync) t = '⚠️ Desynchronisation detected. Use rematch or return to menu to resync.';
@@ -7845,13 +7976,20 @@ async function copyLink(){
 }
 $('shCopy').addEventListener('click',()=>{if(NET.code)copyLink();});
 (function autoJoin(){
-  const m=/[?&]room=([A-Za-z]{6})/.exec(location.search);if(!m)return;
-  const code=m[1].toUpperCase();
-  setTimeout(()=>{
-    const b=document.querySelector('[data-k="mode"] [data-v="online"]');if(b)b.click();
-    $('joinCode').value=code;
-    $('joinRoom').click();
-  },400);
+  // Links look like  https://site/?join=ABCDEF  (new menu)  or  ?room=ABCDEF  (old links)
+  const q=new URLSearchParams(location.search);
+  const code=(q.get('join')||q.get('room')||'').toUpperCase().replace(/[^A-Z]/g,'').slice(0,6);
+  if(code.length!==6)return;
+  let tries=0;
+  const go=()=>{
+    const btn=document.getElementById('abBtnDoJoinRoom'),inp=document.getElementById('abInputJoinCode');
+    if(!window.AB_UI||!btn||!inp){ if(++tries<60)setTimeout(go,200); return; }   // wait for the menu (max ~12s)
+    if(!NET.api){ if(typeof abToast==='function')abToast('Multiplayer server is not reachable. Reload the page and try again.'); return; }
+    try{history.replaceState(null,'',location.pathname);}catch(_){}               // so a refresh does not re-join
+    inp.value=code;
+    btn.click();                                                                  // same path as typing the code + pressing Join -> goes straight to the lobby
+  };
+  if(document.readyState==='complete')setTimeout(go,100);else addEventListener('load',()=>setTimeout(go,100));
 })();
 
 
