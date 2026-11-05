@@ -6,6 +6,23 @@
 <meta name="theme-color" content="#070509">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<script>
+/* Phones: in landscape the page is laid out at a desktop width (1280px) and the browser scales it down to fit,
+   so the menus look exactly like the PC version. Portrait keeps a normal viewport (the rotate prompt shows there). */
+(function(){
+  var coarse=false;try{coarse=matchMedia('(pointer:coarse)').matches;}catch(e){}
+  var phone=coarse&&Math.min(screen.width,screen.height)<=700;
+  if(phone)document.documentElement.className+=' phone';
+  window.__fitVp=function(){
+    if(!phone)return;
+    var vp=document.querySelector('meta[name=viewport]');if(!vp)return;
+    var land=matchMedia('(orientation:landscape)').matches;
+    var want=land?'width=1280,user-scalable=no,viewport-fit=cover':'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover';
+    if(vp.getAttribute('content')!==want)vp.setAttribute('content',want);
+  };
+  window.__fitVp();
+})();
+</script>
 <title>Ashfall Brawl — C++ WebAssembly Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -436,8 +453,17 @@ html,body{overscroll-behavior:none}
 #rotateOverlay .ro-icon{font-size:60px;line-height:1;display:inline-block;animation:roTurn 2.2s ease-in-out infinite}
 #rotateOverlay button{font:800 16px 'Rajdhani','Segoe UI',sans-serif;letter-spacing:.08em;color:#fff;background:#ff3b19;border:0;border-radius:4px;padding:12px 22px;min-height:44px}
 @keyframes roTurn{0%,25%{transform:rotate(0)}65%,100%{transform:rotate(-90deg)}}
-@media (pointer:coarse) and (orientation:portrait) and (max-width:600px){#rotateOverlay{display:flex}}
-@media (pointer:coarse) and (orientation:portrait) and (max-width:600px){body{overflow:hidden}}
+@media (orientation:portrait){html.phone #rotateOverlay{display:flex}html.phone body{overflow:hidden}}
+/* bigger touch buttons + readable bars now that the page is scaled down on phones */
+@media (pointer:coarse) and (orientation:landscape){
+  html.phone .pad{--b:clamp(64px,16vh,88px)}
+  html.phone .netbar{font-size:15px}
+  html.phone header .btn{font-size:14px;min-height:34px;padding:3px 12px}
+  html.phone body{background:#070509}
+}
+.ab-lobby-share{display:none;gap:10px;justify-content:center;margin-top:10px}
+.ab-lobby-share button{font:800 14px 'Rajdhani','Segoe UI',sans-serif;letter-spacing:.08em;color:#fff;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.25);border-radius:4px;padding:8px 16px;cursor:pointer}
+.ab-vs-arena-label{cursor:pointer}
 
 /* DEV PANEL */
 #devPanel{
@@ -2314,6 +2340,7 @@ html,body{overscroll-behavior:none}
         <span>&#9876;</span> START MATCH
       </button>
       <div id="abLobbyStatusHint" class="ab-lobby-hint">Both players must press READY to start.</div>
+      <div id="abLobbyShareRow" class="ab-lobby-share"><button type="button" id="abBtnLobbyCopy">&#128203; COPY LINK</button><button type="button" id="abBtnLobbyWA">&#128172; WHATSAPP</button></div>
     </div>
   </div>
 
@@ -7403,6 +7430,7 @@ async function goLandscape(){
   try{if(screen.orientation&&screen.orientation.lock)await screen.orientation.lock('landscape');}catch(_){}
 }
 let fsTried=false;
+if(window.__fitVp){const mq=matchMedia('(orientation:landscape)');if(mq.addEventListener)mq.addEventListener('change',window.__fitVp);addEventListener('orientationchange',()=>setTimeout(window.__fitVp,150));}
 document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&fsTried)fsUserExit=true;});
 document.addEventListener('pointerup',e=>{
   if(COARSE&&!fsTried){fsTried=true;goLandscape();return;}
@@ -7604,7 +7632,7 @@ function beginNet(m){
 }
 function hostStart(){
   clearInterval(NET.startTimer);
-  const m={t:'start',mid:(Date.now()%1000000000)|0,hp:NET.sel,gp:NET.gpick,dl:pickDelay()};
+  const m={t:'start',mid:(Date.now()%1000000000)|0,hp:NET.sel,gp:NET.gpick,dl:pickDelay(),arena:G.arena||'rooftop'};
   NET.startMsg=m;beginNet(m);
   let n=0;
   NET.startTimer=setInterval(()=>{
@@ -7702,6 +7730,7 @@ function onLob(msg){
     NET.peer=msg.peer;clearInterval(NET.joinTimer);
     const ashUi = document.getElementById('ashfallUI');
     if(ashUi) ashUi.classList.add('ui-hidden');
+    if(typeof m.arena==='string'&&typeof ARENAS_DATA!=='undefined'&&ARENAS_DATA[m.arena])G.arena=m.arena;
     beginNet({mid:m.mid|0,hp:validPick(m.hp),gp:validPick(m.gp),dl:m.dl|0});
     NET.room.emit('lob',{t:'ready',mid:m.mid}).catch(()=>{});
   }
@@ -7867,6 +7896,9 @@ function createColyseusRoomApi(){
       const go=()=>{if(rtc.open||rtc.failed||!room||++n>8){clearInterval(rtc.hiTimer);rtc.hiTimer=0;return;}sigSend('hi');};
       go();rtc.hiTimer=setInterval(go,1500);
     }
+    let lastToken=null;
+    const onVis=()=>{if(document.visibilityState==='visible'&&!room&&!destroyed&&!connecting&&lastToken){fails=0;tryReconnect(lastToken);}};
+    document.addEventListener('visibilitychange',onVis);
     const bind=r=>{
       room=r;fails=0;connecting=false;
       console.log('[net] connected to room',r.roomId,'as',host?'host':'guest');
@@ -7881,6 +7913,7 @@ function createColyseusRoomApi(){
         if(room===r)room=null;
         if(destroyed||codeNum===1000)return;
         setOnMsg('Connection lost. Reconnecting...');
+        lastToken=r.reconnectionToken;
         tryReconnect(r.reconnectionToken);
       });
       r.onError(()=>{});
@@ -7892,7 +7925,7 @@ function createColyseusRoomApi(){
       const p=token?client.reconnect(token):Promise.reject(new Error('no token'));
       p.then(r=>{connecting=false;if(destroyed){r.leave();return;}bind(r);}).catch(()=>{
         connecting=false;
-        if(!destroyed&&++fails<8)retryTimer=setTimeout(()=>tryReconnect(token),1500);
+        if(!destroyed&&++fails<40)retryTimer=setTimeout(()=>tryReconnect(token),1500);
         else if(!destroyed){setOnMsg('Could not reconnect to the server.');for(const fn of peerListeners)fn({left:[{peer:null}]});}
       });
     };
@@ -7909,7 +7942,7 @@ function createColyseusRoomApi(){
       p.then(r=>{connecting=false;if(destroyed){r.leave();return;}bind(r);}).catch(err=>{
         connecting=false;if(destroyed)return;
         const msg=String(err&&err.message||err||'');console.warn('[net] connect failed:',msg,'code=',code,'host=',host);
-        if(!opts.quick&&!host&&/not found|no rooms|invalid|locked|full/i.test(msg)){setOnMsg(/full|locked/i.test(msg)?'That room is already full.':'Room '+code+' was not found (or is full). Check the code and try again.');return;}
+        if(!opts.quick&&!host&&/not found|no rooms|invalid|locked|full/i.test(msg)){try{netCleanup();}catch(_){}setOnMsg(/full|locked/i.test(msg)?'That room is already full.':'Room '+code+' was not found. Ask the host to press CREATE ROOM first, then try again.');try{if(window.AB_UI&&AB_UI.activeScreen==='abScreenMultiLobby')AB_UI.showScreen('abScreenOnlineSetup');}catch(_){}return;}
         if(host&&/already|exists|taken/i.test(msg)){setOnMsg('That room code is taken. Press Create Room again.');return;}
         if(++fails<15){setOnMsg('Waking up the game server... (try '+fails+')');retryTimer=setTimeout(connect,3000);}
         else setOnMsg('Could not reach the game server. Check your connection and try again.');
@@ -7929,7 +7962,7 @@ function createColyseusRoomApi(){
           room.send(event,data);return Promise.resolve();
         }catch(e){return Promise.reject(e);}
       },
-      leave(){destroyed=true;clearTimeout(retryTimer);rtcClose(false);const r=room;room=null;if(r){try{r.leave(true);}catch(_){}}}
+      leave(){destroyed=true;clearTimeout(retryTimer);document.removeEventListener('visibilitychange',onVis);rtcClose(false);const r=room;room=null;if(r){try{r.leave(true);}catch(_){}}}
     };
   }};
 }
@@ -8595,7 +8628,18 @@ const AB_UI = {
       }
     }
 
-    // Arena label
+    // Who is who (so the host/guest roles are obvious)
+    const p1Conn = document.getElementById('abLobbyP1Conn');
+    if (p1Conn) p1Conn.textContent = isHost ? 'You · Host' : (NET.peer ? 'Host · Connected' : 'Connecting to host...');
+    if (p2ConnEl && !isHost) p2ConnEl.textContent = NET.peer ? 'You · Connected' + rtt : 'Connecting to host...';
+    const shareRow = document.getElementById('abLobbyShareRow');
+    if (shareRow) shareRow.style.display = (isHost && !NET.peer) ? 'flex' : 'none';
+
+    // Arena label + picker thumbnail on the create screen
+    const olInfo = ARENAS_DATA[this.multi.arena || G.arena || 'rooftop'];
+    const olThumb = document.getElementById('abOnlineArenaThumb'), olName = document.getElementById('abOnlineArenaName');
+    if (olInfo && olThumb) olThumb.className = 'ab-arena-card-thumb ' + olInfo.cls;
+    if (olInfo && olName) olName.textContent = olInfo.name;
     const arenaInfo = ARENAS_DATA[G.arena || 'rooftop'];
     const lobbyArenaName = document.getElementById('abLobbyArenaName');
     if (lobbyArenaName && arenaInfo) lobbyArenaName.textContent = arenaInfo.name;
@@ -8618,6 +8662,20 @@ const AB_UI = {
   },
 
   
+  setOnlineArena(key) {
+    if (!ARENAS_DATA[key]) return;
+    this.multi.arena = key;
+    G.arena = key;
+    if (NET.room && NET.host) NET.room.emit('lob', { t: 'arena', arena: key }).catch(() => {});
+    this.updateOnlineViews();
+  },
+
+  ensureRoomCreated() {   // sharing the code/link before pressing CREATE ROOM would hand out a code that does not exist yet
+    if (NET.room || NET.lobby) return;
+    const v = document.getElementById('abViewCreateRoom');
+    if (v && v.classList.contains('active')) document.getElementById('abBtnDoCreateRoom')?.click();
+  },
+
   startGame() {
     abPlaySfx('select');
     this.showScreen('abScreenMode');
@@ -8787,7 +8845,8 @@ const AB_UI = {
     });
     document.getElementById('abTabShareWA')?.addEventListener('click', () => {
       abPlaySfx('click');
-      const code = this.multi.code || mkCode();
+      this.ensureRoomCreated();
+      const code = (NET.room && NET.code) || this.multi.code || mkCode();
       const url = window.location.origin + window.location.pathname + '?join=' + code;
       const text = encodeURIComponent('Fight me in Ashfall Brawl! Use Room Code: ' + code + ' or tap: ' + url);
       window.open('https://api.whatsapp.com/send?text=' + text, '_blank');
@@ -8796,7 +8855,8 @@ const AB_UI = {
     // Copy Code & Link
     document.getElementById('abBtnCopyCode')?.addEventListener('click', () => {
       abPlaySfx('click');
-      const code = this.multi.code;
+      this.ensureRoomCreated();
+      const code = (NET.room && NET.code) || this.multi.code;
       const url = window.location.origin + window.location.pathname + '?join=' + code;
       navigator.clipboard.writeText(url).then(() => {
         abToast('Room link & code ' + code + ' copied to clipboard!');
@@ -8804,6 +8864,21 @@ const AB_UI = {
         abToast('Room Code: ' + code);
       });
     });
+
+    // Online arena picker: arrows cycle, thumbnail / lobby label opens the picker. Host only.
+    const cycleOnlineArena = (d) => {
+      if (NET.room && !NET.host) return;
+      abPlaySfx('click');
+      let i = ARENA_KEYS.indexOf(this.multi.arena || G.arena || 'rooftop'); if (i < 0) i = 0;
+      this.setOnlineArena(ARENA_KEYS[(i + d + ARENA_KEYS.length) % ARENA_KEYS.length]);
+    };
+    document.getElementById('abBtnOnlineArenaPrev')?.addEventListener('click', () => cycleOnlineArena(-1));
+    document.getElementById('abBtnOnlineArenaNext')?.addEventListener('click', () => cycleOnlineArena(1));
+    const openOnlineArena = () => { if (NET.room && !NET.host) return; this.arenaTarget = 'online'; this.openModal('abModalArena'); };
+    document.getElementById('abOnlineArenaThumb')?.addEventListener('click', openOnlineArena);
+    document.querySelector('.ab-vs-arena-label')?.addEventListener('click', openOnlineArena);
+    document.getElementById('abBtnLobbyCopy')?.addEventListener('click', () => document.getElementById('abBtnCopyCode')?.click());
+    document.getElementById('abBtnLobbyWA')?.addEventListener('click', () => document.getElementById('abTabShareWA')?.click());
 
     // Create Room Action
     document.getElementById('abBtnDoCreateRoom')?.addEventListener('click', () => {
