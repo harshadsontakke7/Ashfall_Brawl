@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ashfall-brawl-server
+    runtime: node
+    rootDir: server
+    plan: starter            # free tier sleeps after idle; starter keeps WebSockets always-on
+    region: oregon           # pick the Render region closest to most players
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: ALLOWED_ORIGINS
+        value: https://YOUR-APP.vercel.app

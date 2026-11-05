@@ -1,0 +1,5 @@
+{
+  "name": "ashfall-brawl",
+  "private": true,
+  "scripts": { "build": "node scripts/build-config.js" }
+}
