@@ -12,4 +12,4 @@ services:
       - key: NODE_VERSION
         value: 20
       - key: ALLOWED_ORIGINS
-        value: https://YOUR-APP.vercel.app
+        value: https://ashfallbrawl.vercel.app
