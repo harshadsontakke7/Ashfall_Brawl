@@ -2,7 +2,7 @@
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
-const { Server } = require('colyseus');
+const { Server } = require('@colyseus/core');
 const { WebSocketTransport } = require('@colyseus/ws-transport');
 const { FightRoom } = require('./FightRoom');
 
