@@ -2,7 +2,7 @@ const { Room } = require('@colyseus/core');
 const { HOST_ONLY, sanitizeLobby, sanitizeInput, sanitizeSig, Bucket } = require('./protocol');
 
 const CODE_RE = /^[A-Z]{6}$/;
-const RECONNECT_SECONDS = 20;
+const RECONNECT_SECONDS = 90;   // phones drop the socket while the user switches to WhatsApp to share the link
 const IDLE_MS = 10 * 60 * 1000;
 const MAX_DROPS = 500;
 
