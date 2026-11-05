@@ -4,7 +4,7 @@ services:
     runtime: node
     rootDir: server
     plan: free            # free tier sleeps after idle; starter keeps WebSockets always-on
-    region: oregon           # pick the Render region closest to most players
+    region: singapore          # pick the Render region closest to most players
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
