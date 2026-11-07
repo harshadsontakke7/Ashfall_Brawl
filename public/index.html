@@ -5313,8 +5313,11 @@ function aiThink(f,o){
 }
 
 /* ---------- main tick ---------- */
+let NET_STALLED = false;  // true when waiting for remote input
 function tick(){
-  if(NET.active&&!netReady())return;
+  const ready = NET.active ? netReady() : true;
+  NET_STALLED = NET.active && !ready;
+  if(NET_STALLED) return;  // Don't advance simulation without remote input
   G.frame++;G.stepped=false;
   for(const p of G.ash){
     p.y+=p.vy;p.x+=p.vx+dsin((G.frame+p.s)*.02)*.3;
@@ -8161,6 +8164,17 @@ function render(){
   drawHud();
   PRES.drawFront();
   drawCine();
+  // Draw waiting indicator if stalled on remote input
+  if(NET_STALLED){
+    ctx.save();
+    ctx.setTransform(RES,0,0,RES,0,0);
+    ctx.fillStyle='rgba(8,5,12,0.85)';ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='var(--gold)';ctx.font='800 24px var(--display)';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('Waiting for opponent...',W/2,H/2-20);
+    ctx.fillStyle='var(--muted)';ctx.font='600 14px var(--body)';
+    ctx.fillText('Receiving input... (' + NET.stall + '/' + NET.stallTimeout + ')',W/2,H/2+20);
+    ctx.restore();
+  }
 }
 
 function drawArenaTheme(cx){
@@ -8470,10 +8484,10 @@ setInterval(()=>{
 },250);
 
 let DELAY=4;
-NET.rtt=[];
+NET.rtt=0;
 NET.rttSamples=[];
-NET.rttMedian=50;
-NET.jitter=8;
+NET.rttMedian=0;
+NET.jitter=0;
 Object.assign(NET,{
   api:null,room:null,subs:[],code:'',host:false,mid:0,peer:null,
   in:{p1:{},p2:{}},mine:{},t:0,s:0,ack:0,stall:0,stallCount:0,
@@ -8761,7 +8775,7 @@ function onLob(msg){
   }
 }
 function openRoom(code,host,opts){
-  netCleanup();NET.rtt=[];
+  netCleanup();NET.rtt=0;
   const r=NET.api.join('fight-'+code.toLowerCase(),host,opts);
   if(!r)return false;
   NET.room=r;NET.code=code;NET.host=host;NET.me=host?'p1':'p2';NET.sel=G.pick;
@@ -8946,8 +8960,11 @@ function createColyseusRoomApi(){
 
     function rtcClose(resetFailed){
       clearInterval(rtc.hiTimer);rtc.hiTimer=0;clearTimeout(rtc.connTimer);clearInterval(rtc.watch);rtc.watch=0;
+      clearInterval(rtc.pingTimer);rtc.pingTimer=0;
       const dc=rtc.dc,pc=rtc.pc;rtc.dc=null;rtc.pc=null;rtc.open=false;rtc.peerId=null;rtc.q=Promise.resolve();setP2P(false);
       rtc.iceState='closed'; rtc.dcState='closed'; rtc.degraded=false; rtc.degradedSince=0; rtc.healthCheckFails=0; rtc.healthCheckPasses=0;
+      rtc.iceDisconnectedSince = 0;
+      rtc.lastPingSent=0; rtc.lastPongRecv=0; rtc.rttSamples=[];
       if(dc){dc.onopen=dc.onclose=dc.onmessage=dc.onbufferedamountlow=null;try{dc.close();}catch(_){}}
       if(pc){pc.onicecandidate=pc.onconnectionstatechange=pc.oniceconnectionstatechange=pc.ondatachannel=null;try{pc.close();}catch(_){}}
       if(resetFailed)rtc.failed=false;
@@ -8973,11 +8990,18 @@ function createColyseusRoomApi(){
       rtc.dc=dc;
       dc.onopen=()=>{
         rtc.open=true; rtc.lastRx=performance.now(); rtc.dcState='open';
+        rtc.lastPingSent=0; rtc.lastPongRecv=0; rtc.rttSamples=[];
         clearInterval(rtc.hiTimer); rtc.hiTimer=0; clearTimeout(rtc.connTimer);
-        try{NET.rttSamples=[];}catch(_){}
         setP2P(true); logNet('CONNECTED WebRTC P2P', 'peer='+rtc.peerId);
         // DataChannel health monitoring
         dc.onbufferedamountlow=()=>{ if(rtc.degraded) logNet('DC buffer drained'); };
+        // P2P ping/pong for RTT measurement (both host and guest)
+        rtc.pingTimer=setInterval(()=>{
+          if(rtc.open && rtc.dc && rtc.dc.readyState==='open'){
+            rtc.lastPingSent=performance.now();
+            rtc.dc.send(JSON.stringify({e:'lob',d:{t:'ping',ts:rtc.lastPingSent}}));
+          }
+        },1000);
         // Watchdog with hysteresis: require 3 consecutive failures before fallback
         rtc.watch=setInterval(()=>{
           let active=false; try{active=!!NET.active;}catch(_){}
@@ -8986,12 +9010,25 @@ function createColyseusRoomApi(){
           const dcReady=rtc.dc&&rtc.dc.readyState==='open';
           const iceConnected=rtc.pc&&(rtc.pc.iceConnectionState==='connected'||rtc.pc.iceConnectionState==='completed');
 
-          if(sinceRx>8000 || !dcReady || !iceConnected){
+          // Grace period for ICE disconnected: don't count as failure immediately
+          // Only increment fails if ICE has been disconnected for >3 seconds
+          const iceDisconnected = rtc.pc && (rtc.pc.iceConnectionState==='disconnected'||rtc.pc.iceConnectionState==='closed');
+          if(iceDisconnected){
+            rtc.iceDisconnectedSince = rtc.iceDisconnectedSince || performance.now();
+            if(performance.now() - rtc.iceDisconnectedSince > 3000){
+              rtc.healthCheckFails++; rtc.healthCheckPasses=0;
+            }
+          }else{
+            rtc.iceDisconnectedSince = 0;
+            rtc.healthCheckPasses++; rtc.healthCheckFails=0;
+          }
+
+          if(sinceRx>8000 || !dcReady || (iceDisconnected && performance.now() - rtc.iceDisconnectedSince > 3000)){
             rtc.healthCheckFails++; rtc.healthCheckPasses=0;
             rtc.degraded=true; rtc.degradedSince=rtc.degradedSince||performance.now();
             logNet('HEALTH_DEGRADED', 'sinceRx='+Math.round(sinceRx)+'ms', 'dc='+rtc.dcState, 'ice='+rtc.iceState, 'fails='+rtc.healthCheckFails);
             if(rtc.healthCheckFails>=3){
-              rtcFail('health check failed: '+(sinceRx>8000?'no packets':'')+(!dcReady?' dc closed':'')+(!iceConnected?' ice disconnected':''));
+              rtcFail('health check failed: '+(sinceRx>8000?'no packets':'')+(!dcReady?' dc closed':'')+(iceDisconnected?' ice disconnected':''));
             }
           }else{
             rtc.healthCheckPasses++; rtc.healthCheckFails=0;
@@ -9011,8 +9048,22 @@ function createColyseusRoomApi(){
         else if(m.e==='lob'&&m.d&&(m.d.t==='ping'||m.d.t==='pong')&&typeof m.d.ts==='number'&&isFinite(m.d.ts)){
           if(m.d.t==='pong' && rtc.lastPingSent){
             const rtt=performance.now()-rtc.lastPingSent;
-            if(rtt>0 && rtt<3000) rtc.rttSamples.push(rtt);
+            if(rtt>0 && rtt<3000){
+              rtc.rttSamples.push(rtt);
+              // Update NET.rtt for ping indicator (both host and guest)
+              if(rtc.rttSamples.length >= 3){
+                const sorted = rtc.rttSamples.slice().sort((a,b)=>a-b);
+                const median = sorted[Math.floor(sorted.length/2)];
+                let devSum = 0;
+                for(const val of rtc.rttSamples) devSum += Math.abs(val - median);
+                NET.rtt = Math.round(median);
+                NET.jitter = Math.round(devSum / rtc.rttSamples.length);
+              }
+            }
             rtc.lastPongRecv=performance.now();
+          }else if(m.d.t==='ping'){
+            // Respond to peer's ping with pong (echo their timestamp)
+            rtc.dc.send(JSON.stringify({e:'lob',d:{t:'pong',ts:m.d.ts}}));
           }
           fire('lob',{peer:rtc.peerId,data:{t:m.d.t,ts:m.d.ts}});
         }
@@ -9027,10 +9078,10 @@ function createColyseusRoomApi(){
         rtc.iceState=pc.iceConnectionState;
         logNet('ICE_STATE', pc.iceConnectionState);
         if(pc.iceConnectionState==='failed'&&rtc.pc===pc) rtcFail('ICE failed');
-        if(pc.iceConnectionState==='disconnected'||pc.iceConnectionState==='closed'){
-          rtc.healthCheckFails++; rtc.healthCheckPasses=0;
-        }else if(pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed'){
+        // Don't immediately count ICE disconnected as failure - handled by watchdog with 3s grace period
+        if(pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed'){
           rtc.healthCheckPasses++; rtc.healthCheckFails=0;
+          rtc.iceDisconnectedSince = 0;
           if(rtc.degraded && rtc.healthCheckPasses>=2){ rtc.degraded=false; logNet('HEALTH_RECOVERED'); }
         }
       };
