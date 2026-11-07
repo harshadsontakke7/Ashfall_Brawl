@@ -1,5 +1,10 @@
 {
   "name": "ashfall-brawl",
   "private": true,
-  "scripts": { "build": "node scripts/build-config.js" }
+  "scripts": {
+    "build": "node scripts/build-config.js"
+  },
+  "devDependencies": {
+    "ws": "^8.22.1"
+  }
 }

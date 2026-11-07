@@ -8921,17 +8921,48 @@ function createColyseusRoomApi(){
 
     /* ---- WebRTC P2P: inputs and ping/pong go straight peer-to-peer; the Colyseus relay is the fallback ---- */
     const ICE_SERVERS=(Array.isArray(window.ICE_SERVERS)&&window.ICE_SERVERS.length)?window.ICE_SERVERS:[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun.cloudflare.com:3478']}];
-    const rtc={pc:null,dc:null,open:false,failed:false,peerId:null,lastRx:0,relayN:0,hiTimer:0,connTimer:0,watch:0,q:Promise.resolve()};
+
+    // Connection health tracking for degradation vs disconnection distinction
+    const rtc={
+      pc:null,dc:null,open:false,failed:false,peerId:null,lastRx:0,relayN:0,
+      hiTimer:0,connTimer:0,watch:0,q:Promise.resolve(),
+      // Health metrics
+      iceState:'new', dcState:'closed', lastIceState:'new', lastDcState:'closed',
+      degraded:false, degradedSince:0, degradedCount:0,
+      rttSamples:[], lastPingSent:0, lastPongRecv:0,
+      fallbackReason:null, fallbackAt:0, fallbackCount:0,
+      // Hysteresis: require N consecutive checks before fallback
+      healthCheckFails:0, healthCheckPasses:0,
+      // Diagnostics
+      lastLogAt:0, logInterval:5000
+    };
+
     const setP2P=v=>{try{NET.p2p=v;}catch(_){}};
     const sigSend=(k,str)=>{if(!room)return;try{room.send('sig',str===undefined?{k}:{k,s:str});}catch(_){}};
+
+    function logNet(...args){
+      const now=performance.now();
+      if(now-rtc.lastLogAt>=rtc.logInterval||args[0]?.includes?.('FALLBACK')||args[0]?.includes?.('CONNECTED')||args[0]?.includes?.('FAILED')){
+        rtc.lastLogAt=now;
+        console.log('[net]',...args);
+      }
+    }
+
     function rtcClose(resetFailed){
       clearInterval(rtc.hiTimer);rtc.hiTimer=0;clearTimeout(rtc.connTimer);clearInterval(rtc.watch);rtc.watch=0;
       const dc=rtc.dc,pc=rtc.pc;rtc.dc=null;rtc.pc=null;rtc.open=false;rtc.peerId=null;rtc.q=Promise.resolve();setP2P(false);
-      if(dc){dc.onopen=dc.onclose=dc.onmessage=null;try{dc.close();}catch(_){}}
-      if(pc){pc.onicecandidate=pc.onconnectionstatechange=pc.ondatachannel=null;try{pc.close();}catch(_){}}
+      rtc.iceState='closed'; rtc.dcState='closed'; rtc.degraded=false; rtc.degradedSince=0; rtc.healthCheckFails=0; rtc.healthCheckPasses=0;
+      if(dc){dc.onopen=dc.onclose=dc.onmessage=dc.onbufferedamountlow=null;try{dc.close();}catch(_){}}
+      if(pc){pc.onicecandidate=pc.onconnectionstatechange=pc.oniceconnectionstatechange=pc.ondatachannel=null;try{pc.close();}catch(_){}}
       if(resetFailed)rtc.failed=false;
     }
-    function rtcFail(why){console.warn('[net] P2P unavailable, using relay:',why||'');rtcClose(false);rtc.failed=true;}
+
+    function rtcFail(why){
+      rtc.fallbackReason=why; rtc.fallbackAt=performance.now(); rtc.fallbackCount++;
+      logNet('FALLBACK', why, 'count='+rtc.fallbackCount, 'p2p='+rtc.open);
+      rtcClose(false); rtc.failed=true;
+    }
+
     function cleanInp(m){
       const I=Number.isInteger;
       if(!m||typeof m!=='object'||!I(m.mid)||!I(m.a)||m.a<0||!I(m.k)||!Array.isArray(m.d)||m.d.length>32)return null;
@@ -8941,25 +8972,54 @@ function createColyseusRoomApi(){
       if(m.c!==undefined){if(!Array.isArray(m.c)||m.c.length!==2||!I(m.c[0])||!I(m.c[1]))return null;o.c=m.c;}
       return o;
     }
+
     function rtcAttach(dc){
       rtc.dc=dc;
       dc.onopen=()=>{
-        rtc.open=true;rtc.lastRx=performance.now();clearInterval(rtc.hiTimer);rtc.hiTimer=0;clearTimeout(rtc.connTimer);
+        rtc.open=true; rtc.lastRx=performance.now(); rtc.dcState='open';
+        clearInterval(rtc.hiTimer); rtc.hiTimer=0; clearTimeout(rtc.connTimer);
         try{NET.rttSamples=[];}catch(_){}
-        setP2P(true);console.log('[net] WebRTC P2P connected');
-        rtc.watch=setInterval(()=>{   // P2P silently died while a match runs -> fall back to the relay
-          let active=false;try{active=!!NET.active;}catch(_){}
-          if(active&&performance.now()-rtc.lastRx>2500)rtcFail('no packets for 2.5s');
-        },500);
+        setP2P(true); logNet('CONNECTED WebRTC P2P', 'peer='+rtc.peerId);
+        // DataChannel health monitoring
+        dc.onbufferedamountlow=()=>{ if(rtc.degraded) logNet('DC buffer drained'); };
+        // Watchdog with hysteresis: require 3 consecutive failures before fallback
+        rtc.watch=setInterval(()=>{
+          let active=false; try{active=!!NET.active;}catch(_){}
+          if(!active) return;
+          const sinceRx=performance.now()-rtc.lastRx;
+          const dcReady=rtc.dc&&rtc.dc.readyState==='open';
+          const iceConnected=rtc.pc&&(rtc.pc.iceConnectionState==='connected'||rtc.pc.iceConnectionState==='completed');
+
+          if(sinceRx>8000 || !dcReady || !iceConnected){
+            rtc.healthCheckFails++; rtc.healthCheckPasses=0;
+            rtc.degraded=true; rtc.degradedSince=rtc.degradedSince||performance.now();
+            logNet('HEALTH_DEGRADED', 'sinceRx='+Math.round(sinceRx)+'ms', 'dc='+rtc.dcState, 'ice='+rtc.iceState, 'fails='+rtc.healthCheckFails);
+            if(rtc.healthCheckFails>=3){
+              rtcFail('health check failed: '+(sinceRx>8000?'no packets':'')+(!dcReady?' dc closed':'')+(!iceConnected?' ice disconnected':''));
+            }
+          }else{
+            rtc.healthCheckPasses++; rtc.healthCheckFails=0;
+            if(rtc.degraded && rtc.healthCheckPasses>=2){
+              rtc.degraded=false; logNet('HEALTH_RECOVERED');
+            }
+          }
+        },1000); // check every 1s instead of 500ms
       };
-      dc.onclose=()=>{if(rtc.open)rtcFail('channel closed');};
+      dc.onclose=()=>{ rtc.dcState='closed'; if(rtc.open) rtcFail('channel closed'); };
       dc.onmessage=ev=>{
         if(typeof ev.data!=='string'||ev.data.length>2048)return;
         rtc.lastRx=performance.now();
-        let m;try{m=JSON.parse(ev.data);}catch(_){return;}
+        let m; try{m=JSON.parse(ev.data);}catch(_){return;}
         if(!m||typeof m!=='object'||!rtc.peerId)return;
-        if(m.e==='inp'){const d=cleanInp(m.d);if(d)fire('inp',{peer:rtc.peerId,data:d});}
-        else if(m.e==='lob'&&m.d&&(m.d.t==='ping'||m.d.t==='pong')&&typeof m.d.ts==='number'&&isFinite(m.d.ts))fire('lob',{peer:rtc.peerId,data:{t:m.d.t,ts:m.d.ts}});
+        if(m.e==='inp'){const d=cleanInp(m.d); if(d) fire('inp',{peer:rtc.peerId,data:d});}
+        else if(m.e==='lob'&&m.d&&(m.d.t==='ping'||m.d.t==='pong')&&typeof m.d.ts==='number'&&isFinite(m.d.ts)){
+          if(m.d.t==='pong' && rtc.lastPingSent){
+            const rtt=performance.now()-rtc.lastPingSent;
+            if(rtt>0 && rtt<3000) rtc.rttSamples.push(rtt);
+            rtc.lastPongRecv=performance.now();
+          }
+          fire('lob',{peer:rtc.peerId,data:{t:m.d.t,ts:m.d.ts}});
+        }
       };
     }
     function rtcNewPc(peer){
@@ -8967,7 +9027,21 @@ function createColyseusRoomApi(){
       const pc=new RTCPeerConnection({iceServers:ICE_SERVERS});
       rtc.pc=pc;
       pc.onicecandidate=e=>{if(e.candidate)sigSend('ice',JSON.stringify(e.candidate));};
-      pc.onconnectionstatechange=()=>{if(pc.connectionState==='failed'&&rtc.pc===pc)rtcFail('ICE failed');};
+      pc.oniceconnectionstatechange=()=>{
+        rtc.iceState=pc.iceConnectionState;
+        logNet('ICE_STATE', pc.iceConnectionState);
+        if(pc.iceConnectionState==='failed'&&rtc.pc===pc) rtcFail('ICE failed');
+        if(pc.iceConnectionState==='disconnected'||pc.iceConnectionState==='closed'){
+          rtc.healthCheckFails++; rtc.healthCheckPasses=0;
+        }else if(pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed'){
+          rtc.healthCheckPasses++; rtc.healthCheckFails=0;
+          if(rtc.degraded && rtc.healthCheckPasses>=2){ rtc.degraded=false; logNet('HEALTH_RECOVERED'); }
+        }
+      };
+      pc.onconnectionstatechange=()=>{
+        logNet('PC_STATE', pc.connectionState);
+        if(pc.connectionState==='failed'&&rtc.pc===pc) rtcFail('ICE failed');
+      };
       pc.ondatachannel=e=>rtcAttach(e.channel);
       rtc.connTimer=setTimeout(()=>{if(!rtc.open)rtcFail('timeout');},15000);
       return pc;
@@ -9059,9 +9133,12 @@ function createColyseusRoomApi(){
       emit(event,data){
         if(!room)return Promise.reject(new Error('Not connected'));
         try{
-          if(rtc.open&&rtc.dc&&rtc.dc.readyState==='open'){
-            if(event==='inp'){rtc.dc.send(JSON.stringify({e:'inp',d:data}));if(++rtc.relayN%6!==0)return Promise.resolve();}   // every 6th input also goes via the relay as a safety net
+          const useP2P=rtc.open&&rtc.dc&&rtc.dc.readyState==='open' && !rtc.degraded;
+          if(useP2P){
+            if(event==='inp'){rtc.dc.send(JSON.stringify({e:'inp',d:data}));if(++rtc.relayN%6!==0)return Promise.resolve();}
             else if(event==='lob'&&data&&(data.t==='ping'||data.t==='pong')){rtc.dc.send(JSON.stringify({e:'lob',d:data}));return Promise.resolve();}
+          }else{
+            logNet('TRANSPORT_RELAY', 'event='+event, 'p2p='+rtc.open, 'degraded='+rtc.degraded, 'dc='+rtc.dcState, 'ice='+rtc.iceState);
           }
           room.send(event,data);return Promise.resolve();
         }catch(e){return Promise.reject(e);}
@@ -9090,12 +9167,21 @@ setInterval(()=>{
   const b=$('netBar');
   if(!NET.active){return;}
   const rttStr = NET.rtt ? (NET.rtt + 'ms (±' + (NET.jitter||0) + 'ms)') : 'measuring...';
-  let t = 'Online · Room ' + NET.code + ' · ' + (NET.me==='p1'?'P1':'P2') + ' · Delay: ' + Math.round(DELAY*16.67) + 'ms (' + DELAY + 'f) · Ping: ' + rttStr + (NET.p2p?' · P2P':' · Relay');
+  let transport = NET.p2p ? 'P2P' : 'Relay';
+  if(NET.p2p && rtc && rtc.degraded) transport = 'P2P (degraded)';
+  if(NET.p2p && rtc && rtc.failed) transport = 'P2P (failed→Relay)';
+  let t = 'Online · Room ' + NET.code + ' · ' + (NET.me==='p1'?'P1':'P2') + ' · Delay: ' + Math.round(DELAY*16.67) + 'ms (' + DELAY + 'f) · Ping: ' + rttStr + ' · ' + transport;
+  if(rtc){
+    if(rtc.iceState && rtc.iceState!=='new') t += ' · ICE:' + rtc.iceState;
+    if(rtc.dcState && rtc.dcState!=='closed') t += ' · DC:' + rtc.dcState;
+    if(rtc.healthCheckFails>0) t += ' · Fails:' + rtc.healthCheckFails;
+    if(rtc.fallbackCount>0) t += ' · FB:' + rtc.fallbackCount;
+  }
   if(NET.predictedFrames > 0) t += ' · [Predicting: ' + NET.predictedFrames + 'f]';
   if(NET.stall > 10) t = 'Waiting for remote input... (' + NET.stall + '/' + NET.stallTimeout + ')';
   if(NET.desync) t = '⚠️ Desynchronisation detected. Use rematch or return to menu to resync.';
   b.textContent = t;
-  b.classList.toggle('bad', NET.stall > 10 || NET.desync);
+  b.classList.toggle('bad', NET.stall > 10 || NET.desync || (rtc && rtc.degraded));
 }, 250);
 
 function shareLink(){return location.origin+location.pathname+'?room='+NET.code;}
