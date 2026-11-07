@@ -2060,9 +2060,7 @@ body.playing .dpad,body.playing .face{pointer-events:none}
     <div class="tools"><span class="engineBadge" title="Native C++ gameplay core compiled to WebAssembly">C++ / WASM ENGINE</span>
       <button class="btn" id="pauseBtn" type="button">Pause</button>
       <button class="btn" id="sndBtn" type="button" aria-pressed="true">Sound on</button>
-      <button class="btn" id="fsBtn" type="button">Landscape</button>
       <button class="btn" id="menuBtn" type="button">Menu</button>
-      <button class="btn dev-pill" id="devToggleBtn" type="button" title="Toggle Developer Diagnostics Panel (Shortcut: `)">Stats</button>
     </div>
   </header>
   <div class="rotate" id="rotateHint">Turn your phone sideways for the full-screen landscape view.</div>
@@ -8441,7 +8439,7 @@ snd.addEventListener('click',()=>{sound=!sound;ANN.onSoundToggle(sound);snd.setA
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&(G.state==='fight'||G.state==='intro')&&!G.paused&&!NET.active)togglePause();});
 if(document.fonts&&document.fonts.load){document.fonts.load('40px Bungee');document.fonts.load('italic 900 120px "Barlow Condensed"');document.fonts.load('700 20px Rajdhani');}
 
-document.getElementById('fsBtn').addEventListener('click',async e=>{
+document.getElementById('fsBtn')?.addEventListener('click',async e=>{
   e.currentTarget.blur();
   try{
     if(document.fullscreenElement){await document.exitFullscreen();return;}
