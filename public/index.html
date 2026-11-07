@@ -243,19 +243,6 @@ dt.who:first-child{margin-top:0}
 .netbar.bad{border-color:var(--ember);border-left-color:var(--ember);color:var(--gold);background:rgba(255,59,25,.1);}
 .netbar[hidden]{display:none !important}
 
-/* PING INDICATOR (bottom-left during online matches) */
-.ping-indicator{
-  position:fixed;left:12px;bottom:12px;z-index:10;
-  padding:6px 10px;font:700 12px var(--display);letter-spacing:.1em;
-  background:rgba(8,5,12,.85);border:1px solid var(--line);
-  clip-path:polygon(4px 0,100% 0,calc(100% - 4px) 100%,0 100%);
-  color:var(--ink);white-space:nowrap;
-}
-.ping-indicator[hidden]{display:none !important}
-.ping-indicator.good{color:#5dff9a;border-color:#5dff9a;}
-.ping-indicator.warn{color:var(--gold);border-color:var(--gold);}
-.ping-indicator.bad{color:var(--ember);border-color:var(--ember);}
-
 /* ONBOX & ROOM LOBBY */
 .onbox{display:grid;gap:10px}
 .onbtns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -2073,13 +2060,14 @@ body.playing .dpad,body.playing .face{pointer-events:none}
     <div class="tools"><span class="engineBadge" title="Native C++ gameplay core compiled to WebAssembly">C++ / WASM ENGINE</span>
       <button class="btn" id="pauseBtn" type="button">Pause</button>
       <button class="btn" id="sndBtn" type="button" aria-pressed="true">Sound on</button>
+      <button class="btn" id="fsBtn" type="button">Landscape</button>
       <button class="btn" id="menuBtn" type="button">Menu</button>
+      <button class="btn dev-pill" id="devToggleBtn" type="button" title="Toggle Developer Diagnostics Panel (Shortcut: `)">Stats</button>
     </div>
   </header>
   <div class="rotate" id="rotateHint">Turn your phone sideways for the full-screen landscape view.</div>
   <div class="netbar" id="netBar" role="status" hidden></div>
   <div class="stage"><canvas id="c" aria-label="Fighting arena"></canvas></div>
-  <div class="ping-indicator" id="pingIndicator" hidden aria-live="polite"></div>
   <div class="pad" id="pad" aria-label="Touch controls">
     <div class="dpad">
       <button type="button" class="up" data-k="KeyW" aria-label="Jump">&#9650;</button>
@@ -3687,6 +3675,11 @@ function applyInput(f,bits){
 }
 const PREVENT=new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space','Quote','Slash','Period','Semicolon','Enter','BracketLeft','BracketRight','Backslash']);
 window.addEventListener('keydown',e=>{
+  if(e.code==='Backquote'){
+    toggleDevPanel();
+    e.preventDefault();
+    return;
+  }
   if(e.metaKey||e.ctrlKey||e.altKey)return;
   const abUi=document.getElementById('ashfallUI');
   const resultOpen=!document.getElementById('menu').hidden;
@@ -8291,7 +8284,10 @@ function toggleDevPanel(){
   DEV.enabled = !DEV.enabled;
   const p = document.getElementById('devPanel');
   if(p) p.hidden = !DEV.enabled;
+  const btn = document.getElementById('devToggleBtn');
+  if(btn) btn.setAttribute('aria-pressed', String(DEV.enabled));
 }
+document.getElementById('devToggleBtn')?.addEventListener('click', toggleDevPanel);
 
 function updateDevPanel(now){
   if(!DEV.enabled || now - DEV.lastDevUpdate < 100) return;
@@ -8444,6 +8440,15 @@ const snd=document.getElementById('sndBtn');
 snd.addEventListener('click',()=>{sound=!sound;ANN.onSoundToggle(sound);snd.setAttribute('aria-pressed',String(sound));snd.textContent=sound?'Sound on':'Sound off';snd.blur();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&(G.state==='fight'||G.state==='intro')&&!G.paused&&!NET.active)togglePause();});
 if(document.fonts&&document.fonts.load){document.fonts.load('40px Bungee');document.fonts.load('italic 900 120px "Barlow Condensed"');document.fonts.load('700 20px Rajdhani');}
+
+document.getElementById('fsBtn').addEventListener('click',async e=>{
+  e.currentTarget.blur();
+  try{
+    if(document.fullscreenElement){await document.exitFullscreen();return;}
+    await document.documentElement.requestFullscreen();
+  }catch(_){}
+  try{if(screen.orientation&&screen.orientation.lock)await screen.orientation.lock('landscape');}catch(_){}
+});
 
 /* ---- Landscape helper: fullscreen + orientation lock (Android Chrome); overlay covers iOS ---- */
 const COARSE=matchMedia('(pointer:coarse)').matches;
@@ -8637,7 +8642,6 @@ function netCleanup(){
   if(NET.room){try{NET.room.emit('lob',{t:'bye'}).catch(()=>{});}catch(_){}try{NET.room.leave();}catch(_){}}
   NET.room=null;NET.active=false;NET.lobby=false;NET.ready=false;NET.peerReady=false;NET.peer=null;NET.host=false;NET.startMsg=null;
   $('netBar').hidden=true;
-  $('pingIndicator').hidden=true;
 }
 function netLeave(){netCleanup();}
 function netAbort(text){
@@ -9178,20 +9182,6 @@ setInterval(()=>{
   if(NET.desync) t = '⚠️ Desynchronisation detected. Use rematch or return to menu to resync.';
   b.textContent = t;
   b.classList.toggle('bad', NET.stall > 10 || NET.desync || (rtc && rtc.degraded));
-
-  // Ping indicator (bottom-left)
-  const pi = $('pingIndicator');
-  if(pi){
-    if(NET.rtt && NET.rtt > 0){
-      pi.hidden = false;
-      pi.textContent = '● ' + NET.rtt + ' ms';
-      pi.className = 'ping-indicator ' + (NET.rtt < 80 ? 'good' : NET.rtt < 150 ? 'warn' : 'bad');
-    }else{
-      pi.hidden = false;
-      pi.textContent = '● -- ms';
-      pi.className = 'ping-indicator';
-    }
-  }
 }, 250);
 
 function shareLink(){return location.origin+location.pathname+'?room='+NET.code;}
